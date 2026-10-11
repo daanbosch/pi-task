@@ -64,7 +64,7 @@ function fakeGit(script: Record<string, string[]>): {
         calls,
         git: args => {
             calls.push(args)
-            const key = args[0] === '-c' ? args[2] : args[0]
+            const key = args.find((a, i) => !a.startsWith('-') && args[i - 1] !== '-c') ?? ''
             const queue = script[key] ?? ['']
             const i = Math.min(counters[key] ?? 0, queue.length - 1)
             counters[key] = (counters[key] ?? 0) + 1
@@ -214,7 +214,7 @@ test('runBoundedLintFix: child edit to a clean frozen path → reverted, not app
     expect(r.contradiction?.frozenPath).toBe('tsconfig.json')
     expect(r.reason).toContain('tsconfig.json')
     expect(calls.some(c => c.includes('checkout') && c.includes('HEAD'))).toBe(true)
-    expect(calls.some(c => c[0] === 'clean')).toBe(true)
+    expect(calls.some(c => c.includes('clean'))).toBe(true)
 })
 
 test('runBoundedLintFix: frozen path ALREADY dirty pre-child → never reverted, fix applied', async () => {

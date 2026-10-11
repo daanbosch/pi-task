@@ -290,7 +290,7 @@ async function concludingMerge(
     for (const head of ['MERGE_HEAD', 'CHERRY_PICK_HEAD']) {
         const exact = await git(cwd, ['show-ref', '-q', '--exists', head], signal, spawnFn)
         if (exact.exitCode === 0) return true
-        if (exact.exitCode === 2) continue
+        if (exact.exitCode !== 129) continue
         // Git before 2.43 has no `--exists`. rev-parse also resolves a branch of that name.
         const loose = await git(cwd, ['rev-parse', '-q', '--verify', head], signal, spawnFn)
         if (loose.exitCode === 0) return true
@@ -308,9 +308,9 @@ async function concludingMerge(
  *
  * Only cwd moves. An enforce commit holds only cwd, so a sibling package's
  * uncommitted edits are still in the worktree here, and a repo-wide `reset --hard
- * HEAD~1` destroyed them. cwd is restored to the parent, which also discards what
- * the re-verify wrote there, and then HEAD alone steps back. A commit that
- * concluded a merge is refused: its first parent is not the tree before it.
+ * HEAD~1` destroyed them. HEAD steps back, then cwd is restored to it, which also
+ * discards the re-verify's edits to tracked files. A commit that concluded a
+ * merge is refused: its first parent is not the tree before it.
  *
  * It must NOT rewind the forensic gate trail either. `.pi-tasks/` is frequently
  * TRACKED here — unlike the accept-debt ledger's writers, the per-task snapshot
@@ -326,20 +326,34 @@ export async function gitDropLastCommit(
     spawnFn?: SpawnFn
 ): Promise<boolean> {
     const parents = await git(cwd, ['rev-list', '--parents', '-n', '1', 'HEAD'], signal, spawnFn)
-    if (parents.exitCode !== 0 || parents.stdout.trim().split(' ').length !== 2) return false
+    const [commit, ...parent] = parents.stdout.trim().split(' ')
+    if (parents.exitCode !== 0 || parent.length !== 1) return false
     const trail = await snapshotTrail(cwd)
-    const restored = await git(
-        cwd,
-        ['restore', '--source=HEAD~1', '--staged', '--worktree', '--', '.'],
-        signal,
-        spawnFn
-    )
-    const dropped =
-        !restored.aborted
-        && restored.exitCode === 0
-        && (await git(cwd, ['reset', '-q', '--soft', 'HEAD~1'], signal, spawnFn)).exitCode === 0
+    const dropped = await stepBack(cwd, commit, signal, spawnFn)
     await restoreTrail(cwd, trail)
     return dropped
+}
+
+/** HEAD moves first: git can refuse that, and it moves no file. A step that fails
+ *  after it is undone, so HEAD and cwd never end on different commits. */
+async function stepBack(
+    cwd: string,
+    commit: string,
+    signal?: AbortSignal,
+    spawnFn?: SpawnFn
+): Promise<boolean> {
+    const reset = await git(cwd, ['reset', '-q', '--soft', 'HEAD~1'], signal, spawnFn)
+    if (reset.exitCode !== 0 && !reset.aborted) return false
+    const restoreCwd = (s?: AbortSignal) =>
+        git(cwd, ['restore', '--source=HEAD', '--staged', '--worktree', '--', '.'], s, spawnFn)
+    if (!reset.aborted) {
+        const restored = await restoreCwd(signal)
+        if (restored.exitCode === 0 && !restored.aborted) return true
+    }
+    // Unsignalled, so a cancel cannot stop the undo.
+    await git(cwd, ['reset', '-q', '--soft', commit], undefined, spawnFn)
+    if (!reset.aborted) await restoreCwd()
+    return false
 }
 
 /** Read every file under `.pi-tasks/` into memory (relative path → bytes). Best-effort:

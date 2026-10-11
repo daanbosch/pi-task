@@ -1,6 +1,5 @@
 /**
- * frozen-path-guard tests. frozenPathsFromSpec and parseChangedFrozenFiles are
- * pure, so they are called directly. revertFrozenPaths is run twice: with a fake
+ * frozen-path-guard tests. frozenPathsFromSpec is pure, so it is called directly. revertFrozenPaths is run twice: with a fake
  * git, asserting the exact argv it issues, and against a real throwaway repo,
  * asserting what is left on disk afterwards.
  */
@@ -11,7 +10,6 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import {
     frozenPathsFromSpec,
-    parseChangedFrozenFiles,
     revertFrozenPaths,
     type FrozenGit
 } from '../../src/task/frozen-path-guard.js'
@@ -42,33 +40,6 @@ describe('frozenPathsFromSpec', () => {
     })
 })
 
-describe('parseChangedFrozenFiles', () => {
-    test('empty / whitespace porcelain → no files', () => {
-        expect(parseChangedFrozenFiles('')).toEqual([])
-        expect(parseChangedFrozenFiles('\n\n')).toEqual([])
-    })
-
-    test('parses modified, deleted, untracked, and renamed entries', () => {
-        const porcelain = [
-            ' M src/server/index.ts',
-            'D  config/schema.ts',
-            '?? src/server/new.ts',
-            'R  old/a.ts -> src/server/b.ts'
-        ].join('\n')
-        expect(parseChangedFrozenFiles(porcelain)).toEqual([
-            'src/server/index.ts',
-            'config/schema.ts',
-            'src/server/new.ts',
-            'src/server/b.ts' // rename → the NEW (written) side
-        ])
-    })
-
-    test('de-duplicates and unquotes paths with unusual chars', () => {
-        const porcelain = [' M "src/a b.ts"', ' M "src/a b.ts"'].join('\n')
-        expect(parseChangedFrozenFiles(porcelain)).toEqual(['src/a b.ts'])
-    })
-})
-
 describe('revertFrozenPaths (fake git)', () => {
     test('no frozen paths → no git calls, nothing reverted', async () => {
         const calls: string[][] = []
@@ -89,7 +60,9 @@ describe('revertFrozenPaths (fake git)', () => {
         expect(await revertFrozenPaths(['src/server/index.ts'], git)).toEqual([])
         // Only the status probe ran: revertFrozenPaths returns before it reaches
         // checkout/clean when status names no changed file.
-        expect(calls).toEqual([['status', '--porcelain', '-z', '--', 'src/server/index.ts']])
+        expect(calls).toEqual([
+            ['--literal-pathspecs', 'status', '--porcelain', '-z', '--', 'src/server/index.ts']
+        ])
     })
 
     test('changed frozen path → checkout HEAD + clean, returns the file list', async () => {
@@ -102,7 +75,7 @@ describe('revertFrozenPaths (fake git)', () => {
         const reverted = await revertFrozenPaths(['src/server/index.ts'], git)
         expect(reverted).toEqual(['src/server/index.ts'])
         expect(calls).toEqual([
-            ['status', '--porcelain', '-z', '--', 'src/server/index.ts'],
+            ['--literal-pathspecs', 'status', '--porcelain', '-z', '--', 'src/server/index.ts'],
             ['rev-parse', '--show-prefix'],
             [
                 '--literal-pathspecs',
@@ -113,7 +86,7 @@ describe('revertFrozenPaths (fake git)', () => {
                 '--',
                 'src/server/index.ts'
             ],
-            ['clean', '-fdq', '--', 'src/server/index.ts']
+            ['--literal-pathspecs', 'clean', '-fdq', '--', 'src/server/index.ts']
         ])
     })
 

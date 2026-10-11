@@ -69,41 +69,7 @@ export function pathNamedIn(text: string, path: string): boolean {
     return new RegExp(`(?:^|[^\\w./-])${escapeRe(p)}(?!\\.?[\\w-])`, 'im').test(text)
 }
 
-/**
- * Parse `git status --porcelain` output (already scoped to the frozen pathspec)
- * into the list of changed files, for the gate-trail record and to decide whether
- * anything must be reverted at all. A rename line (`R  old -> new`) yields the NEW
- * path — the side that carries the child's write. Deterministic and pure so the
- * parsing is unit-tested without a real repo.
- *
- * Every shape below was taken from real `git status --porcelain` output, not
- * assumed: ` M path`, ` D path`, `?? path`, `R  old -> new`, and a path
- * containing a space, which git emits wrapped in double quotes.
- */
-export function parseChangedFrozenFiles(porcelain: string): string[] {
-    const out: string[] = []
-    const seen = new Set<string>()
-    for (const raw of porcelain.split('\n')) {
-        // Porcelain v1: two status chars, a space, then the path. Blank/short lines
-        // (trailing newline) carry no entry.
-        if (raw.length < 4) continue
-        let file = raw.slice(3).trim()
-        if (file.length === 0) continue
-        // Rename/copy: "orig -> new" — the new path is the one the write produced.
-        const arrow = file.indexOf(' -> ')
-        if (arrow !== -1) file = file.slice(arrow + 4).trim()
-        // Porcelain quotes paths with unusual chars; strip the surrounding quotes.
-        if (file.startsWith('"') && file.endsWith('"') && file.length >= 2) {
-            file = file.slice(1, -1)
-        }
-        if (file.length === 0 || seen.has(file)) continue
-        seen.add(file)
-        out.push(file)
-    }
-    return out
-}
-
-/** Status codes of a conflicted file, which `checkout -f` skips. */
+/** Status codes of a conflicted file. A checkout from HEAD would end its conflict. */
 const UNMERGED = /^(DD|AU|UD|UA|DU|AA|UU)$/
 
 /**
@@ -136,8 +102,9 @@ export async function revertFrozenPaths(paths: string[], git: FrozenGit): Promis
     if (exitCode !== 0 || entries.length === 0) return []
     // A name git tracks in neither HEAD nor the index fails the whole checkout, and
     // a name is a glob to a pathspec unless it is literal.
+    const settled = entries.filter(e => !UNMERGED.test(e.code))
     const tracked = new Set(
-        entries
+        settled
             .filter(e => e.code !== '??')
             .flatMap(e => (e.from === undefined ? [e.path] : [e.path, e.from]))
     )
@@ -154,7 +121,7 @@ export async function revertFrozenPaths(paths: string[], git: FrozenGit): Promis
                 ...tracked
             ])
         ).exitCode === 0
-    await git(['clean', '-fdq', '--', ...paths])
-    const reverted = entries.filter(e => (restored ? !UNMERGED.test(e.code) : !tracked.has(e.path)))
+    await git(['--literal-pathspecs', 'clean', '-fdq', '--', ...paths])
+    const reverted = settled.filter(e => restored || e.code === '??')
     return [...new Set(reverted.map(e => e.path))]
 }

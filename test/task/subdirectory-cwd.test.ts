@@ -5,10 +5,12 @@
  * wrong file, missed an artifact, or failed open.
  */
 import {expect, setDefaultTimeout, test} from 'bun:test'
-import {execFileSync} from 'node:child_process'
+import {execFileSync, spawn} from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import {tmpDir} from '../test-utils/tmp-dir.js'
+import {fakeSpawnByPrompt} from '../test-utils/fake-spawn.js'
+import type {SpawnFn} from '../../src/shared/child-process.js'
 import {makeGit, statusFromCwd} from '../../src/shared/git-runner.js'
 import {
     collectChangedFiles,
@@ -21,6 +23,7 @@ import {captureGitState, reconcileGitState} from '../../src/task/git-state-guard
 import {lazyHealthBaseline} from '../../src/task/health-baseline.js'
 import {gitCommitAll, gitDropLastCommit} from '../../src/task/auto-commit.js'
 import {revertFrozenPaths} from '../../src/task/frozen-path-guard.js'
+import {runBoundedLintFix, type LintFixResult} from '../../src/task/lint-fix.js'
 
 // Real git subprocesses, several per test.
 setDefaultTimeout(30_000)
@@ -464,3 +467,119 @@ test.skipIf(reftableRepo() === null)(
         expect(g('status', '--porcelain')).toBe('')
     }
 )
+
+// `checkout -f HEAD` takes HEAD's side of a conflict and ends it.
+test('a frozen-path revert leaves a conflicted file conflicted', async () => {
+    const {app, g} = repo()
+    g('checkout', '-q', '-b', 'other')
+    fs.writeFileSync(path.join(app, 'a.ts'), 'export const a = 5\n')
+    g('commit', '-qam', 'other')
+    g('checkout', '-q', 'main')
+    fs.writeFileSync(path.join(app, 'a.ts'), 'export const a = 6\n')
+    g('commit', '-qam', 'main')
+    try {
+        g('merge', '-q', 'other')
+    } catch {
+        // the conflict is the point
+    }
+    fs.writeFileSync(path.join(app, '.gitignore'), 'edited\n')
+    expect(await revertFrozenPaths(['a.ts', '.gitignore'], makeGit(app))).toEqual(['.gitignore'])
+    expect(g('ls-files', '-u', '--', 'app/a.ts')).not.toBe('')
+    expect(fs.readFileSync(path.join(app, 'a.ts'), 'utf8')).toContain('<<<<<<<')
+})
+
+// A name from status can hold `[`, and status and clean read it as a glob.
+test('a frozen-path revert of a bracketed name keeps the files it matches as a glob', async () => {
+    const {app, g} = repo()
+    fs.writeFileSync(path.join(app, '[i].ts'), 'export const b = 1\n')
+    fs.writeFileSync(path.join(app, 'i.ts'), 'export const i = 1\n')
+    g('add', '-A')
+    g('commit', '-q', '-m', 'bracket')
+    fs.writeFileSync(path.join(app, '[i].ts'), 'export const b = 2\n')
+    fs.writeFileSync(path.join(app, 'i.ts'), 'export const i = 2\n')
+    expect(await revertFrozenPaths(['[i].ts'], makeGit(app))).toEqual(['[i].ts'])
+    expect(fs.readFileSync(path.join(app, '[i].ts'), 'utf8')).toBe('export const b = 1\n')
+    expect(fs.readFileSync(path.join(app, 'i.ts'), 'utf8')).toBe('export const i = 2\n')
+})
+
+// `reset --soft` refuses mid-merge, and cwd must not be left at the parent under the commit.
+test('a drop that git refuses leaves the tree as it was', async () => {
+    const {dir, app, g} = repo()
+    g('checkout', '-q', '-b', 'other')
+    fs.writeFileSync(path.join(dir, 'sibling.ts'), 'export const s = 5\n')
+    g('commit', '-qam', 'other')
+    g('checkout', '-q', 'main')
+    fs.writeFileSync(path.join(app, 'a.ts'), 'export const a = 3\n')
+    await gitCommitAll(app, 'ENFORCE GUIDELINES')
+    g('merge', '-q', '--no-ff', '--no-commit', 'other')
+    expect(await gitDropLastCommit(app)).toBe(false)
+    expect(g('log', '-1', '--format=%s')).toBe('ENFORCE GUIDELINES')
+    expect(fs.readFileSync(path.join(app, 'a.ts'), 'utf8')).toBe('export const a = 3\n')
+    expect(g('diff', 'HEAD', '--name-only', '--', 'app')).toBe('')
+})
+
+function lintFixIn(app: string, frozen: string[], child: () => void): Promise<LintFixResult> {
+    return runBoundedLintFix({
+        cwd: app,
+        failReason: 'repo health: `bun run lint` exited 1',
+        runChild: () => {
+            child()
+            return Promise.resolve('LINT-FIX: DONE')
+        },
+        repoHealth: () => Promise.resolve({ok: true, reason: 'clean'}),
+        git: makeGit(app),
+        frozenPaths: frozen
+    })
+}
+
+test('the lint-fix frozen guard undoes a staged rename inside a frozen directory', async () => {
+    const {app, g} = repo()
+    fs.mkdirSync(path.join(app, 'frozen'))
+    fs.writeFileSync(path.join(app, 'frozen', 'a.ts'), 'export const f = 1\n')
+    g('add', '-A')
+    g('commit', '-q', '-m', 'frozen')
+    const r = await lintFixIn(app, ['frozen'], () => g('mv', 'app/frozen/a.ts', 'app/frozen/b.ts'))
+    expect(r.class).toBe('frozen-path')
+    expect(fs.readFileSync(path.join(app, 'frozen', 'a.ts'), 'utf8')).toBe('export const f = 1\n')
+    expect(fs.existsSync(path.join(app, 'frozen', 'b.ts'))).toBe(false)
+    expect(g('status', '--porcelain')).toBe('')
+})
+
+test.skipIf(process.platform === 'win32')(
+    'the lint-fix frozen guard undoes an edit to a frozen file whose name holds a tab',
+    async () => {
+        const {app, g} = repo()
+        fs.mkdirSync(path.join(app, 'frozen'))
+        fs.writeFileSync(path.join(app, 'frozen', 'a\tb.ts'), 'tab\n')
+        g('add', '-A')
+        g('commit', '-q', '-m', 'tab')
+        const r = await lintFixIn(app, ['frozen'], () =>
+            fs.writeFileSync(path.join(app, 'frozen', 'a\tb.ts'), 'edited\n')
+        )
+        expect(r.reason).toContain('reverted')
+        expect(fs.readFileSync(path.join(app, 'frozen', 'a\tb.ts'), 'utf8')).toBe('tab\n')
+    }
+)
+
+// A cancel or a lock can stop the drop between its two steps.
+test('a drop whose second step fails puts the first one back', async () => {
+    const {app, g} = repo()
+    fs.writeFileSync(path.join(app, 'a.ts'), 'export const a = 3\n')
+    await gitCommitAll(app, 'ENFORCE GUIDELINES')
+    const failing = fakeSpawnByPrompt(() => ({stdout: '', exitCode: 1}))
+    let moved = false
+    let failed = false
+    const spawnFn: SpawnFn = (cmd, args, opts) => {
+        if (moved && !failed) {
+            failed = true
+            return failing(cmd, args, opts)
+        }
+        if (args[0] === 'restore' || args[0] === 'reset') moved = true
+        return spawn(cmd, args, opts) as unknown as ReturnType<SpawnFn>
+    }
+    expect(await gitDropLastCommit(app, undefined, spawnFn)).toBe(false)
+    expect(failed).toBe(true)
+    expect(g('log', '-1', '--format=%s')).toBe('ENFORCE GUIDELINES')
+    expect(fs.readFileSync(path.join(app, 'a.ts'), 'utf8')).toBe('export const a = 3\n')
+    expect(g('status', '--porcelain')).toBe('')
+})

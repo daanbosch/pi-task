@@ -68,6 +68,11 @@ test('gitCommitAll: git without show-ref --exists falls back to rev-parse', asyn
     expect(await commitArgs(129, 1)).toEqual(['commit', '-m', 'task', '--', '.'])
 })
 
+// rev-parse would resolve a branch named MERGE_HEAD; a cwd-only commit fails safe mid-merge.
+test('gitCommitAll: a show-ref lookup error does not fall back to rev-parse', async () => {
+    expect(await commitArgs(1, 0)).toEqual(['commit', '-m', 'task', '--', '.'])
+})
+
 test('gitCommitAll: not a git repository → reported, no commit attempted', async () => {
     let committed = false
     const spawn = fakeSpawnByPrompt(args => {

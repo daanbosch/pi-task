@@ -60,8 +60,8 @@
  * only cost time, never work. Armed only when both `currentTaskId` and
  * `introducedBy` are wired.
  */
-import {statusFromCwd} from '../shared/git-runner.js'
-import {parseChangedFrozenFiles, pathNamedIn, revertFrozenPaths} from './frozen-path-guard.js'
+import {statusEntriesFromCwd, statusFromCwd} from '../shared/git-runner.js'
+import {pathNamedIn, revertFrozenPaths} from './frozen-path-guard.js'
 import {runFixChild} from './fix-child.js'
 import {parseTreeChanges, type TreeChangeSummary} from './write-guard.js'
 import {findCrossTaskDeletions} from './task-provenance.js'
@@ -225,12 +225,14 @@ async function treeChanges(deps: LintFixDeps): Promise<TreeChangeSummary | null>
 /**
  * Which spec-frozen paths currently show a change in `git status`? Null when git
  * itself failed — inconclusive, not evidence (same discipline as dirtyFiles).
+ * A rename names its source too: a revert scoped to the new name alone sees an
+ * added file, and leaves the source deleted.
  */
 async function frozenDirtySet(deps: LintFixDeps, frozen: string[]): Promise<Set<string> | null> {
     if (frozen.length === 0) return new Set()
-    const r = await statusFromCwd(deps.git, ['--', ...frozen])
-    if (r.exitCode !== 0) return null
-    return new Set(parseChangedFrozenFiles(r.stdout))
+    const {entries, exitCode} = await statusEntriesFromCwd(deps.git, ['--', ...frozen])
+    if (exitCode !== 0) return null
+    return new Set(entries.flatMap(e => (e.from === undefined ? [e.path] : [e.path, e.from])))
 }
 
 /**
