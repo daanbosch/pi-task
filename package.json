@@ -20,11 +20,11 @@
     "peerDependencies": {
         "@earendil-works/pi-coding-agent": ">=0.80.0",
         "@earendil-works/pi-agent-core": ">=0.80.0",
-        "@earendil-works/pi-tui": ">=0.80.0"
+        "@earendil-works/pi-tui": ">=0.80.0",
+        "@sinclair/typebox": "*"
     },
     "dependencies": {
         "@mozilla/readability": "0.6.0",
-        "@sinclair/typebox": "0.34.49",
         "linkedom": "0.18.12",
         "qrcode": "1.5.4",
         "turndown": "7.2.4",
