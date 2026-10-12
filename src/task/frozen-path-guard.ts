@@ -83,7 +83,9 @@ const UNMERGED = /^(DD|AU|UD|UA|DU|AA|UU)$/
  * separate concern the verify prohibition probe surfaces. `git checkout -f HEAD`
  * with `--no-overlay` restores every changed file git tracks and removes the ones
  * HEAD lacks, staged or intent-to-add; `git clean -fdq` removes untracked files the
- * pass created under a frozen directory. Both are scoped to the frozen pathspec.
+ * pass created. Both are scoped to the frozen pathspec, except a rename's source:
+ * it can sit outside it, and restoring the rename without it would leave the
+ * source deleted.
  *
  * Run against a real repo with one frozen directory and one free one: a modified
  * file came back to its HEAD content, a deleted file came back, and two untracked
@@ -108,6 +110,21 @@ export async function revertFrozenPaths(paths: string[], git: FrozenGit): Promis
             .filter(e => e.code !== '??')
             .flatMap(e => (e.from === undefined ? [e.path] : [e.path, e.from]))
     )
+    // An added file here can be the DESTINATION of a rename whose source sits
+    // outside `paths`: status scoped to the destination cannot pair the two, and
+    // a checkout of the destination alone would leave the source deleted. Only an
+    // UNSCOPED probe sees the pair; `-- .` would not, from a subdirectory cwd.
+    if (settled.some(e => e.code.startsWith('A') && e.from === undefined)) {
+        const {entries: whole} = await statusEntriesFromCwd(git, [])
+        const renamedFrom = new Map(
+            whole.filter(e => e.from !== undefined).map(e => [e.path, e.from])
+        )
+        for (const e of settled) {
+            if (!e.code.startsWith('A') || e.from !== undefined) continue
+            const from = renamedFrom.get(e.path)
+            if (from !== undefined) tracked.add(from)
+        }
+    }
     const restored =
         tracked.size === 0
         || (

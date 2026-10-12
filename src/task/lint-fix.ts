@@ -225,12 +225,18 @@ async function treeChanges(deps: LintFixDeps): Promise<TreeChangeSummary | null>
 /**
  * Which spec-frozen paths currently show a change in `git status`? Null when git
  * itself failed — inconclusive, not evidence (same discipline as dirtyFiles).
- * A rename names its source too: a revert scoped to the new name alone sees an
- * added file, and leaves the source deleted.
+ * A rename names its source too: a rename inside the frozen paths changes both
+ * files, and the violation set must name both.
  */
 async function frozenDirtySet(deps: LintFixDeps, frozen: string[]): Promise<Set<string> | null> {
     if (frozen.length === 0) return new Set()
-    const {entries, exitCode} = await statusEntriesFromCwd(deps.git, ['--', ...frozen])
+    // Default status collapses an untracked directory to one name, which would hide a
+    // file the child added inside one that already existed pre-child.
+    const {entries, exitCode} = await statusEntriesFromCwd(deps.git, [
+        '--untracked-files=all',
+        '--',
+        ...frozen
+    ])
     if (exitCode !== 0) return null
     return new Set(entries.flatMap(e => (e.from === undefined ? [e.path] : [e.path, e.from])))
 }

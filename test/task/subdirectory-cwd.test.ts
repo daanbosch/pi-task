@@ -561,6 +561,36 @@ test.skipIf(process.platform === 'win32')(
     }
 )
 
+// Default `status` collapses an untracked directory to one name, so a file the
+// child adds inside an already-existing untracked directory is invisible to the
+// frozen guard's pre/post diff.
+test('the lint-fix frozen guard catches a creation inside a pre-existing untracked directory', async () => {
+    const {app} = repo()
+    fs.mkdirSync(path.join(app, 'frozen', 'junk'), {recursive: true})
+    fs.writeFileSync(path.join(app, 'frozen', 'junk', 'pre.txt'), 'keep\n')
+    const r = await lintFixIn(app, ['frozen'], () =>
+        fs.writeFileSync(path.join(app, 'frozen', 'junk', 'x.ts'), 'export const x = 1\n')
+    )
+    expect(r.class).toBe('frozen-path')
+    expect(fs.existsSync(path.join(app, 'frozen', 'junk', 'x.ts'))).toBe(false)
+    expect(fs.readFileSync(path.join(app, 'frozen', 'junk', 'pre.txt'), 'utf8')).toBe('keep\n')
+})
+
+// The checkout names the changed files status reported, which can include a
+// rename's source outside the frozen pathspec. Naming it is what restores it.
+test('the lint-fix frozen guard undoes a rename whose source sits outside the frozen path', async () => {
+    const {dir, app, g} = repo()
+    fs.mkdirSync(path.join(app, 'frozen'))
+    fs.writeFileSync(path.join(dir, 'outside.ts'), 'export const o = 1\n')
+    g('add', '-A')
+    g('commit', '-q', '-m', 'outside')
+    const r = await lintFixIn(app, ['frozen'], () => g('mv', 'outside.ts', 'app/frozen/b.ts'))
+    expect(r.class).toBe('frozen-path')
+    expect(fs.readFileSync(path.join(dir, 'outside.ts'), 'utf8')).toBe('export const o = 1\n')
+    expect(fs.existsSync(path.join(app, 'frozen', 'b.ts'))).toBe(false)
+    expect(g('status', '--porcelain')).toBe('')
+})
+
 // A cancel or a lock can stop the drop between its two steps.
 test('a drop whose second step fails puts the first one back', async () => {
     const {app, g} = repo()
